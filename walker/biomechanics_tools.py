@@ -7,6 +7,7 @@ import bioviz
 import ezc3d
 import numpy as np
 from scipy import signal
+import matplotlib.pyplot as plt
 
 from .misc import differentiate, to_rotation_matrix, to_euler
 from .plugin_gait import SimplePluginGait
@@ -17,8 +18,26 @@ def suffix_to_all(values: tuple[str, ...] | list[str, ...], suffix: str) -> tupl
 
 
 class BiomechanicsTools:
-    def __init__(self, body_mass: float, include_upper_body: bool = True):
-        self.generic_model = SimplePluginGait(body_mass, include_upper_body=False)
+    def __init__(self,
+                 body_mass: float = None,
+                 shoulder_offset: dict = None,
+                 elbow_width: dict = None,
+                 wrist_width: dict = None,
+                 hand_thickness: dict = None,
+                 leg_length: dict = None,
+                 ankle_width: dict = None,
+                 include_upper_body: bool = True,
+                 ):
+        self.generic_model = SimplePluginGait(
+            body_mass,
+            include_upper_body=include_upper_body,
+            shoulder_offset=shoulder_offset,
+            elbow_width=elbow_width,
+            wrist_width=wrist_width,
+            hand_thickness=hand_thickness,
+            leg_length=leg_length,
+            ankle_width=ankle_width,
+        )
         self.model = None
 
         self.is_kinematic_reconstructed: bool = False
@@ -31,6 +50,7 @@ class BiomechanicsTools:
         self.qddot: np.ndarray = np.ndarray(())
         self.tau: np.ndarray = np.ndarray(())
         self.center_of_mass = np.ndarray(())
+        self.angular_momentum: np.ndarray = np.ndarray(())
 
         self.events = None
         self.bioviz_window: bioviz.Viz | None = None
@@ -72,8 +92,9 @@ class BiomechanicsTools:
         compute_automatic_events
             If the automatic event finding algorithm should be used. Otherwise, the events in the c3d file are used
         """
-        self.process_kinematics(trial)
+        self.process_kinematics(trial, visualize=True)
         self.inverse_dynamics()  # TODO ADD force platform
+        self.calculate_angular_momentum()
 
         # Write the c3d as if it was the plug in gate output
         path = os.path.dirname(trial)
@@ -138,6 +159,10 @@ class BiomechanicsTools:
         )
         missing_percentage_per_frame = n_nan_marker_per_frame / n_technical_markers
 
+        # fig, axs = plt.subplots(nrows=3)
+        # axs[0].plot(missing_percentage_per_frame)
+        # plt.show()
+
         is_frame_accepted = list(missing_percentage_per_frame < (1 - acceptance_threshold))
         first_frame = is_frame_accepted.index(True)
         is_frame_accepted.reverse()
@@ -163,10 +188,16 @@ class BiomechanicsTools:
 
         first_frame_c3d = self.c3d["header"]["points"]["first_frame"]
         last_frame_c3d = self.c3d["header"]["points"]["last_frame"]
-        n_frames_before = (frames.start - first_frame_c3d) if frames.start is not None else 0
-        n_frames_after = (last_frame_c3d - frames.stop + 1) if frames.stop is not None else 0
+        n_frames_before = 0# (first_frame_c3d - frames.start) if frames.start is not None else 0
+        n_frames_after = 0 #(last_frame_c3d - frames.stop + 1) if frames.stop is not None else 0
         n_frames_total = last_frame_c3d - first_frame_c3d + 1
         self.t, self.q, self.qdot, self.qddot = biorbd.extended_kalman_filter(self.model, self.c3d_path, frames=frames)
+        # todo: calculate error biorbd.forward
+        # marker_names = tuple(n.to_string() for n in self.model.technicalMarkerNames())
+        # for q in self.q:
+        #     markers = self.model.markers(q)
+        #     for i, m in enumerate(self.model.technicalMarkerNames):
+        #         self.model.ma(self.q[0], i).to_array()
 
         # Align the data with the c3d
         n_q = self.q.shape[0]
@@ -314,6 +345,27 @@ class BiomechanicsTools:
 
         self.is_inverse_dynamic_performed = True
         return self.tau
+
+    def calculate_angular_momentum(self) -> np.ndarray:
+        """
+        Calculate the angular momentum of a previously reconstructed kinematics
+
+        Returns
+        -------
+        Stores and return de angular momentum at CoM
+        """
+        if not self.is_kinematic_reconstructed:
+            raise RuntimeError("The kinematics must be reconstructed before performing the inverse dynamics")
+
+        # TODO Compute if norm(external_force) < threshold, then nan
+        self.sigma = np.array(
+            [
+                self.model.angularMomentum(q, qdot).to_array()
+                for q, qdot in zip(self.q.T, self.qdot.T)
+            ]
+        ).T
+
+        return self.sigma
 
     def find_feet_events(self) -> tuple[int, tuple[str, ...], tuple[str, ...], np.ndarray]:
         """
